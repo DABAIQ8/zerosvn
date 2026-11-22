@@ -40,6 +40,10 @@
       .tag{font-size:11.5px;font-weight:700;color:var(--accent-deep);background:var(--accent-soft);border-radius:999px;padding:2px 9px;line-height:1.6}
       .topbar .spacer{flex:1}
       .save-state{font-size:12.5px;color:var(--muted)}
+      .save-state.warn{color:var(--danger);font-weight:600}
+      .sync-banner{max-width:960px;margin:14px auto 0;padding:12px 16px;background:var(--accent-soft);border:1px solid var(--line-strong);border-radius:10px;font-size:14px;color:var(--ink);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+      .sync-banner[hidden]{display:none}
+      .sync-banner .sb-text{flex:1;min-width:200px}
       /* 按钮 */
       .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:38px;padding:7px 16px;border-radius:8px;border:1px solid var(--line-strong);background:var(--surface);color:var(--ink);font-size:14px;font-weight:600;text-decoration:none}
       .btn:hover{border-color:var(--accent);color:var(--accent-deep)}
@@ -150,6 +154,8 @@
       </div>
     </header>
 
+    <div class="sync-banner" id="syncBanner" hidden></div>
+
     <nav class="tabs" role="tablist" aria-label="编辑分区">
       <button type="button" class="tab" role="tab" data-tab="home" aria-selected="true">主页</button>
       <button type="button" class="tab" role="tab" data-tab="posts" aria-selected="false">文章</button>
@@ -163,7 +169,7 @@
     <main id="panels"></main>
 
     <footer>
-      <p>编辑内容自动保存在这台设备的浏览器里，换浏览器或清缓存会回到博客当前内容。发布会把生成的 index.html 提交到 GitHub 仓库 DABAIQ8/zerosvn 的 main 分支，zerosvn.me 随后自动更新。</p>
+      <p>打开编辑器时会自动和 zerosvn.me 线上内容对一遍：本机没有草稿就直接用线上最新内容；本机草稿和线上不一样会先弹窗让你选，不会悄悄覆盖。修改也会自动保存在这台设备的浏览器里。发布会把生成的 index.html 提交到 GitHub 仓库 DABAIQ8/zerosvn 的 main 分支，zerosvn.me 随后自动更新。</p>
     </footer>
 
     <div class="overlay" id="previewOverlay" hidden>
@@ -196,14 +202,24 @@ var BLOG_TEMPLATE = "<!doctype html>\n<html lang=\"zh-CN\">\n<head>\n<meta chars
 var ICON_NAMES = {mail:"信封",chat:"对话气泡",code:"代码括号",person:"人物",spark:"星光",play:"播放",search:"放大镜",grid:"四格",school:"学校",book:"书本",game:"手柄",globe:"地球",link:"链接",star:"星星",music:"音乐",camera:"相机",heart:"爱心"};
 
 var LS_DATA = "zerosvn.standalone.editor.data.v1";
+var LS_SYNCED = "zerosvn.standalone.editor.synced.v1";
 var LS_TOKEN = "zerosvn.gh.token";
 var REPO = {owner:"DABAIQ8", name:"zerosvn", branch:"main", path:"index.html"};
 
 function clone(o){ return JSON.parse(JSON.stringify(o)); }
+function dataStr(d){ try{ return JSON.stringify(d); }catch(e){ return ""; } }
+/* 上次和线上一致时的内容快照：打开时拿它判断本机草稿有没有未发布的改动 */
+var SYNCED_STR = "";
+try{ SYNCED_STR = localStorage.getItem(LS_SYNCED) || ""; }catch(e){}
+function setSynced(d){
+  SYNCED_STR = dataStr(d);
+  try{ localStorage.setItem(LS_SYNCED, SYNCED_STR); }catch(e){}
+}
+var hasLocalDraft = false;
 function loadData(){
   try{
     var raw = localStorage.getItem(LS_DATA);
-    if(raw){ var d = JSON.parse(raw); if(d && d.articles && d.talks) return d; }
+    if(raw){ var d = JSON.parse(raw); if(d && d.articles && d.talks){ hasLocalDraft = true; return d; } }
   }catch(e){}
   return clone(SEED);
 }
@@ -212,10 +228,10 @@ var DATA = loadData();
 var saveTimer = null;
 function saveData(){
   var st = document.getElementById("saveState");
-  if(st) st.textContent = "正在保存…";
+  if(st){ st.textContent = "正在保存…"; st.classList.remove("warn"); }
   clearTimeout(saveTimer);
   saveTimer = setTimeout(function(){
-    try{ localStorage.setItem(LS_DATA, JSON.stringify(DATA)); }catch(e){}
+    try{ localStorage.setItem(LS_DATA, JSON.stringify(DATA)); hasLocalDraft = true; }catch(e){}
     var now = new Date();
     function p(n){ return (n<10?"0":"")+n; }
     if(st) st.textContent = "已保存在本机 " + p(now.getHours()) + ":" + p(now.getMinutes()) + ":" + p(now.getSeconds());
@@ -421,6 +437,7 @@ function askConfirm(title, text, okText, cb){
   document.getElementById("modalTitle").textContent = title;
   document.getElementById("modalText").textContent = text;
   document.getElementById("modalOk").textContent = okText || "确定";
+  document.getElementById("modalCancel").textContent = "取消";
   modalCb = cb;
   document.getElementById("modalWrap").hidden = false;
 }
@@ -1113,7 +1130,7 @@ function renderPublishCards(sec){
   sec.appendChild(pc);
 
   /* 内容管理卡 */
-  var mc = card("内容管理", "换电脑或浏览器时，先从线上把博客当前内容拉回来再改，避免用旧内容覆盖新内容。");
+  var mc = card("内容管理", "编辑器打开时会自动和线上对一遍：没有本机草稿就直接用线上最新内容，草稿和线上不一样会弹窗让你选。这里也可以手动拉取、下载备份。");
   var row2 = el("div"); row2.style.display = "flex"; row2.style.gap = "8px"; row2.style.flexWrap = "wrap";
   var imp = el("button", "btn", "从 zerosvn.me 拉取最新内容"); imp.type = "button";
   imp.addEventListener("click", function(){
@@ -1121,7 +1138,7 @@ function renderPublishCards(sec){
       imp.disabled = true; imp.textContent = "拉取中…";
       importFromLive().then(function(ok){
         imp.disabled = false; imp.textContent = "从 zerosvn.me 拉取最新内容";
-        if(ok){ DATA = loadData(); render(); toast("已拉取线上最新内容"); }
+        if(ok){ DATA = loadData(); setSynced(DATA); render(); toast("已拉取线上最新内容"); }
       });
     });
   });
@@ -1139,7 +1156,10 @@ function renderPublishCards(sec){
   var reset = el("button", "btn warn", "恢复为初始内容"); reset.type = "button";
   reset.addEventListener("click", function(){
     askConfirm("恢复为初始内容？", "编辑器会回到这份独立版自带的初始内容（博客 2026-11-22 的样子），本机修改会清掉。建议先「拉取最新内容」而不是恢复初始。", "恢复", function(){
-      DATA = clone(SEED); saveData(); render(); toast("已恢复为初始内容");
+      DATA = clone(SEED);
+      try{ localStorage.removeItem(LS_SYNCED); }catch(e){}
+      SYNCED_STR = "";
+      saveData(); render(); toast("已恢复为初始内容");
     });
   });
   row2.appendChild(imp); row2.appendChild(dl); row2.appendChild(reset);
@@ -1367,6 +1387,7 @@ function publish(btn){
     })
     .then(function(){
       logLine('<span class="ok">发布成功。</span>zerosvn.me 一般在一两分钟内更新，打开没变化的话刷新一下页面。');
+      setSynced(DATA);
       toast("发布成功");
     })
     .catch(function(e){
@@ -1437,7 +1458,8 @@ function extractVar(src, name){
   var p = new JSP(src.slice(m.index + m[0].length));
   return p.parse();
 }
-function importFromLive(){
+function importFromLive(opts){
+  var quiet = !!(opts && opts.quiet);
   return fetch("https://zerosvn.me/index.html?t=" + Date.now(), {cache:"no-store"})
     .then(function(r){ if(!r.ok) throw new Error("拉取失败 " + r.status); return r.text(); })
     .then(function(html){
@@ -1521,12 +1543,100 @@ function importFromLive(){
       d.about.rewardNote = txt(".reward-note") || d.about.rewardNote;
       try{ localStorage.setItem(LS_DATA, JSON.stringify(d)); }catch(e){}
       DATA = d;
+      setSynced(d);
       return true;
     })
     .catch(function(e){
-      toast("拉取失败：" + e.message);
+      if(!quiet) toast("拉取失败：" + e.message);
       return false;
     });
+}
+
+/* ============ 打开时自动和线上对账 ============
+   本机没草稿 → 直接用线上最新内容；草稿和上次同步一致 → 线上有更新就自动跟上；
+   草稿有未发布的改动、线上也和草稿不一样 → 弹窗让用户选，绝不悄悄覆盖；
+   连不上线上 → 顶部明确提示当前显示的是本机内容（草稿或初始内容）。 */
+function setSyncState(text, warn){
+  var st = document.getElementById("saveState");
+  if(!st) return;
+  st.textContent = text;
+  if(warn) st.classList.add("warn"); else st.classList.remove("warn");
+}
+function showSyncBanner(html, btnText, onBtn){
+  var b = document.getElementById("syncBanner");
+  if(!b) return;
+  b.innerHTML = "";
+  var s = el("span", "sb-text"); s.innerHTML = html;
+  b.appendChild(s);
+  if(btnText && onBtn){
+    var btn = el("button", "btn small", btnText); btn.type = "button";
+    btn.addEventListener("click", function(){ b.hidden = true; onBtn(); });
+    b.appendChild(btn);
+  }
+  var x = el("button", "btn small", "知道了"); x.type = "button";
+  x.addEventListener("click", function(){ b.hidden = true; });
+  b.appendChild(x);
+  b.hidden = false;
+}
+function autoSyncOnLoad(){
+  var wasDraft = hasLocalDraft;
+  var localStr = dataStr(DATA);
+  var baselineAtLoad = SYNCED_STR; /* 拉取成功会更新 SYNCED_STR，判断草稿是否改过要用打开时的基准 */
+  setSyncState("正在和线上同步…", false);
+  importFromLive({quiet:true}).then(function(ok){
+    if(!ok){
+      if(wasDraft){
+        setSyncState("未同步：连不上 zerosvn.me", true);
+        showSyncBanner("连不上 zerosvn.me，没法确认线上最新内容。当前显示的是<b>这台设备上次保存的草稿</b>，不是初始内容；联网后重新打开编辑器会自动同步。", null, null);
+      } else {
+        setSyncState("未同步：显示的是初始内容", true);
+        showSyncBanner("连不上 zerosvn.me，也没有找到本机草稿。当前显示的是编辑器<b>自带的初始内容（博客 2026-11-22 的样子）</b>，不一定是博客现在的样子。先别在这里改，联网后重新打开会自动拉取线上最新内容。", null, null);
+      }
+      return;
+    }
+    var liveStr = dataStr(DATA); /* importFromLive 成功时已把 DATA 换成线上内容 */
+    if(!wasDraft){
+      render();
+      setSyncState("已同步线上最新内容", false);
+      toast("已自动同步 zerosvn.me 上的最新内容");
+      return;
+    }
+    if(localStr === liveStr){
+      setSyncState("已同步：内容和线上一致", false);
+      return;
+    }
+    var localDirty = baselineAtLoad ? (localStr !== baselineAtLoad) : (localStr !== dataStr(SEED));
+    if(!localDirty){
+      render();
+      setSyncState("已同步线上最新内容", false);
+      toast("线上内容有更新，已自动同步");
+      return;
+    }
+    /* 本机有未发布的改动，线上也不是这份改动：让用户选，不覆盖 */
+    var localData = null;
+    try{ localData = JSON.parse(localStr); }catch(e){}
+    setSyncState("本机草稿和线上不一致，等你选择", true);
+    var cancelBtn = document.getElementById("modalCancel");
+    var onCancel = function(){
+      cancelBtn.removeEventListener("click", onCancel);
+      if(localData){ DATA = localData; }
+      try{ localStorage.setItem(LS_DATA, localStr); }catch(e){}
+      render();
+      setSyncState("用的是本机草稿（未发布）", true);
+      toast("已保留本机草稿，发布后以它为准");
+    };
+    cancelBtn.addEventListener("click", onCancel);
+    askConfirm("本机草稿和线上内容不一样",
+      "这台设备上有一份还没发布的修改，zerosvn.me 上的内容和它对不上（可能是在别的设备上改过并发了布）。选「用线上内容」会丢掉这份未发布的修改；选「保留本机草稿」就继续用这份修改，之后发布会以它为准。",
+      "用线上内容",
+      function(){
+        cancelBtn.removeEventListener("click", onCancel);
+        render();
+        setSyncState("已同步线上最新内容", false);
+        toast("已改用线上最新内容");
+      });
+    cancelBtn.textContent = "保留本机草稿";
+  });
 }
 
 /* ============ 页签与预览 ============ */
@@ -1562,6 +1672,7 @@ document.getElementById("btnClosePreview").addEventListener("click", function(){
   document.getElementById("previewFrame").srcdoc = "";
 });
 render();
+autoSyncOnLoad();
 </script>
 </body>
 </html>
