@@ -846,7 +846,8 @@ function renderPublishCards(sec){
     inp.style.width = "100%"; inp.style.marginTop = "12px"; inp.style.background = "var(--surface-2)";
     inp.style.border = "1px solid var(--line-strong)"; inp.style.borderRadius = "8px"; inp.style.padding = "9px 12px"; inp.style.minHeight = "42px";
     tc.appendChild(inp);
-    var save = el("button", "btn primary", "保存密钥"); save.type = "button"; save.style.marginTop = "10px";
+    var rowSave = el("div"); rowSave.style.marginTop = "10px"; rowSave.style.display = "flex"; rowSave.style.gap = "8px"; rowSave.style.flexWrap = "wrap"; rowSave.style.alignItems = "center";
+    var save = el("button", "btn primary", "保存密钥"); save.type = "button";
     save.addEventListener("click", function(){
       var v = inp.value.trim();
       if(!v){ toast("先粘贴密钥"); return; }
@@ -854,7 +855,17 @@ function renderPublishCards(sec){
       toast("密钥已保存");
       render();
     });
-    tc.appendChild(save);
+    var test2 = el("button", "btn", "测试连接"); test2.type = "button";
+    test2.addEventListener("click", function(){
+      var v = inp.value.trim();
+      if(!v){ toast("先粘贴密钥"); return; }
+      test2.disabled = true; test2.textContent = "测试中…";
+      testConnection(v).then(function(){
+        test2.disabled = false; test2.textContent = "测试连接";
+      });
+    });
+    rowSave.appendChild(save); rowSave.appendChild(test2);
+    tc.appendChild(rowSave);
   }
   tc.id = "publishArea";
   sec.appendChild(tc);
@@ -1041,7 +1052,7 @@ function b64encode(str){
 function ghApi(path, opts){
   opts = opts || {};
   var headers = {
-    "Authorization": "Bearer " + getToken(),
+    "Authorization": "Bearer " + (opts.token || getToken()),
     "Accept": "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28"
   };
@@ -1062,9 +1073,10 @@ function logLine(html){
   log.appendChild(li);
   return li;
 }
-function testConnection(){
-  if(!getToken()){ toast("还没有保存密钥"); return Promise.resolve(false); }
-  return ghApi("/repos/" + REPO.owner + "/" + REPO.name)
+function testConnection(tokenOverride){
+  var tok = (tokenOverride || "").trim() || getToken();
+  if(!tok){ toast("还没有保存密钥"); return Promise.resolve(false); }
+  return ghApi("/repos/" + REPO.owner + "/" + REPO.name, {token: tok})
     .then(function(r){
       var perm = r.permissions || {};
       toast("连接成功：" + r.full_name + (perm.push ? "（可写入）" : "（注意：这个密钥没有写入权限）"));
