@@ -89,12 +89,17 @@
       .img-field input[type="text"]{width:100%;font-size:13.5px;background:var(--surface-2);border:1px solid var(--line-strong);border-radius:8px;padding:8px 10px;min-height:40px;font-family:var(--mono)}
       /* 条目卡 */
       .item{border:1px solid var(--line);border-radius:12px;background:var(--surface);margin-bottom:14px;overflow:hidden}
-      .item-head{display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--surface-2);border-bottom:1px solid var(--line);flex-wrap:wrap}
+      .item-head{display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--surface-2);border-bottom:1px solid var(--line);flex-wrap:wrap;cursor:pointer}
       .item-head .ttl{font-weight:700;font-size:14.5px;flex:1;min-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       .item-head .sub{font-size:12.5px;color:var(--muted);font-family:var(--mono)}
       .item-body{padding:16px 18px 6px}
       .item-body[hidden]{display:none}
       .add-row{margin:4px 0 18px}
+      .add-top{margin:0 0 16px}
+      .add-top .btn{width:100%;min-height:46px;font-size:15.5px}
+      .import-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+      .import-note{font-size:13.5px;margin:12px 0 0;color:var(--ink-2);line-height:1.6}
+      .import-note.err{color:var(--danger);font-weight:600}
       .link-row{display:flex;gap:8px;align-items:flex-start;padding:10px 0;border-bottom:1px dashed var(--line)}
       .link-row:last-of-type{border-bottom:0}
       .link-row .flds{flex:1;min-width:0;display:grid;grid-template-columns:1fr;gap:8px}
@@ -392,6 +397,7 @@ function itemHead(title, sub, handlers){
   var h = el("div", "item-head");
   h.appendChild(el("span", "ttl", title || "（未命名）"));
   if(sub) h.appendChild(el("span", "sub", sub));
+  h.addEventListener("click", function(){ if(handlers.toggle) handlers.toggle(); });
   function btn(txt, fn, danger){
     var b = el("button", "icon-btn" + (danger ? " danger" : ""), txt); b.type = "button";
     b.addEventListener("click", function(e){ e.stopPropagation(); fn(); });
@@ -508,6 +514,243 @@ function syncFirstSlide(){
   if(DATA.heroSlides.length){ DATA.banners.home.src = DATA.heroSlides[0].src; DATA.banners.home.alt = DATA.heroSlides[0].alt; }
 }
 
+/* ---------- 导入文章：Word（.docx）/ Excel / CSV ----------
+   解析库（Mammoth、JSZip、SheetJS）只在点导入时才从 CDN 加载，不拖慢编辑器打开。 */
+var MAMMOTH_URL = "https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js";
+var JSZIP_URL = "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js";
+var XLSX_URL = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";
+var libPromises = {};
+function loadLib(key, url, globalName){
+  if(window[globalName]) return Promise.resolve();
+  if(!libPromises[key]){
+    libPromises[key] = new Promise(function(res, rej){
+      var s = document.createElement("script");
+      s.src = url;
+      s.onload = function(){ res(); };
+      s.onerror = function(){ delete libPromises[key]; rej(new Error("解析库加载失败，检查网络后再试一次")); };
+      document.head.appendChild(s);
+    });
+  }
+  return libPromises[key];
+}
+function readArrayBuffer(file){
+  return new Promise(function(res, rej){
+    var r = new FileReader();
+    r.onload = function(){ res(r.result); };
+    r.onerror = function(){ rej(new Error("文件读取失败")); };
+    r.readAsArrayBuffer(file);
+  });
+}
+function pad2(n){ return (n < 10 ? "0" : "") + n; }
+function todayStr(){ var t = new Date(); return t.getFullYear() + "-" + pad2(t.getMonth() + 1) + "-" + pad2(t.getDate()); }
+function uniqueArticleId(){
+  var id;
+  do { id = "post-" + Date.now().toString(36) + Math.floor(Math.random() * 46656).toString(36); }
+  while(DATA.articles.some(function(a){ return a.id === id; }));
+  return id;
+}
+function estimateMins(html){
+  var n = stripTags(html || "").replace(/\s+/g, "").length;
+  return "约 " + Math.max(1, Math.ceil(n / 400)) + " 分钟";
+}
+function deriveExcerpt(html){
+  var t = stripTags(html || "").replace(/\s+/g, " ").trim();
+  return t.length > 90 ? t.slice(0, 90) + "…" : t;
+}
+function decodeXmlText(s){
+  var ta = document.createElement("textarea");
+  ta.innerHTML = s;
+  return ta.value;
+}
+function addArticle(){
+  var id = uniqueArticleId();
+  DATA.articles.unshift({id:id, tag:DATA.categories[0] || "", date:todayStr(),
+    mins:"约 3 分钟", title:"新文章", excerpt:"", body:"<p>在这里写正文。</p>"});
+  openState["art" + id] = true;
+  render(); saveData();
+}
+function addTalk(){
+  DATA.talks.unshift({date:todayStr(), text:"", photos:[]});
+  openState["talk0"] = true;
+  render(); saveData();
+}
+var importNote = "";
+var importNoteIsErr = false;
+function finishImport(made, problems){
+  if(made.length){
+    DATA.articles = made.concat(DATA.articles);
+    openState["art" + made[0].id] = true;
+  }
+  var msg = "";
+  if(made.length) msg = "已导入 " + made.length + " 篇文章（" + made.map(function(a){ return "《" + a.title + "》"; }).join("、") + "），排在下面列表最上面，第一篇已经展开，检查改好后发布就行。";
+  if(problems && problems.length) msg += (msg ? " " : "") + problems.join(" ");
+  importNote = msg || "没有读到可导入的文章。";
+  importNoteIsErr = !made.length;
+  render(); saveData();
+  toast(made.length ? "已导入 " + made.length + " 篇文章" : "导入没成功，看导入区的提示");
+}
+/* Word：一个 .docx 一篇文章。标题优先取文档属性里的标题，其次第一个大标题，再其次正文开头，最后文件名。 */
+function docxToArticle(file){
+  return readArrayBuffer(file).then(function(buf){
+    var titleP = loadLib("jszip", JSZIP_URL, "JSZip").then(function(){
+      return JSZip.loadAsync(buf).then(function(zip){
+        var f = zip.file("docProps/core.xml");
+        if(!f) return "";
+        return f.async("string").then(function(xml){
+          var m = /<dc:title>([\s\S]*?)<\/dc:title>/.exec(xml);
+          return m ? decodeXmlText(m[1]).trim() : "";
+        });
+      });
+    }).catch(function(){ return ""; });
+    var htmlP = loadLib("mammoth", MAMMOTH_URL, "mammoth").then(function(){
+      return mammoth.convertToHtml({arrayBuffer: buf});
+    }).then(function(r){ return r.value || ""; });
+    return Promise.all([titleP, htmlP]).then(function(vals){
+      var title = vals[0];
+      var div = document.createElement("div");
+      div.innerHTML = vals[1];
+      var firstHead = div.querySelector("h1, h2, h3");
+      if(!title && firstHead) title = firstHead.textContent.replace(/\s+/g, " ").trim();
+      var firstEl = div.firstElementChild;
+      if(firstEl && /^H[1-6]$/.test(firstEl.tagName) && title && firstEl.textContent.replace(/\s+/g, " ").trim() === title) firstEl.remove();
+      var heads = div.querySelectorAll("h1, h2");
+      for(var i = 0; i < heads.length; i++){
+        var h3 = document.createElement("h3");
+        h3.innerHTML = heads[i].innerHTML;
+        heads[i].parentNode.replaceChild(h3, heads[i]);
+      }
+      function isEmptyP(n){ return n && n.tagName === "P" && !n.textContent.trim() && !n.querySelector("img"); }
+      while(isEmptyP(div.firstElementChild)) div.firstElementChild.remove();
+      while(isEmptyP(div.lastElementChild)) div.lastElementChild.remove();
+      var parts = [];
+      for(var j = 0; j < div.children.length; j++) parts.push(div.children[j].outerHTML);
+      var body = parts.join("\n");
+      if(!body && div.textContent.trim()) body = "<p>" + esc(div.textContent.trim()) + "</p>";
+      if(!title){
+        var t = stripTags(body).replace(/\s+/g, " ").trim();
+        title = t ? t.slice(0, 30) : file.name.replace(/\.docx$/i, "");
+      }
+      return {id: uniqueArticleId(), tag: DATA.categories[0] || "", date: todayStr(),
+        mins: estimateMins(body), title: title, excerpt: deriveExcerpt(body), body: body};
+    });
+  });
+}
+/* Excel / CSV：一行一篇文章，列为 标题、栏目、日期、摘要、正文。 */
+function normDate(v){
+  if(v == null || v === "") return todayStr();
+  if(Object.prototype.toString.call(v) === "[object Date]" && !isNaN(v.getTime()))
+    return v.getFullYear() + "-" + pad2(v.getMonth() + 1) + "-" + pad2(v.getDate());
+  if(typeof v === "number" && v > 20000 && v < 80000){
+    var d = new Date(Math.round((v - 25569) * 86400000));
+    return d.getUTCFullYear() + "-" + pad2(d.getUTCMonth() + 1) + "-" + pad2(d.getUTCDate());
+  }
+  var s = String(v).trim().replace(/[\/.]/g, "-");
+  var m = /(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+  if(m) return m[1] + "-" + pad2(+m[2]) + "-" + pad2(+m[3]);
+  return s || todayStr();
+}
+function textToHtml(t){
+  t = String(t == null ? "" : t).replace(/\r\n?/g, "\n").trim();
+  if(!t) return "";
+  if(/<(p|h3|ul|ol|li|b|strong|br|div|table)[\s>]/i.test(t)) return t;
+  return t.split(/\n{2,}/).map(function(block){
+    return "<p>" + esc(block).replace(/\n/g, "<br>") + "</p>";
+  }).join("\n");
+}
+function rowGet(row, names){
+  var keys = Object.keys(row);
+  for(var i = 0; i < keys.length; i++){
+    if(names.indexOf(String(keys[i]).trim()) >= 0){
+      var v = row[keys[i]];
+      if(v != null && String(v).trim() !== "") return v;
+    }
+  }
+  return "";
+}
+function sheetToArticles(file){
+  return loadLib("xlsx", XLSX_URL, "XLSX").then(function(){
+    return readArrayBuffer(file);
+  }).then(function(buf){
+    var wb = XLSX.read(new Uint8Array(buf), {type: "array", cellDates: true});
+    var ws = wb.Sheets[wb.SheetNames[0]];
+    if(!ws) throw new Error("表格里没有工作表");
+    var rows = XLSX.utils.sheet_to_json(ws, {defval: ""});
+    var made = [], skipped = 0;
+    rows.forEach(function(r){
+      var title = String(rowGet(r, ["标题", "题目", "title", "Title"]) || "").trim();
+      var body = textToHtml(rowGet(r, ["正文", "内容", "body", "content"]));
+      if(!title && !stripTags(body).trim()){ skipped++; return; }
+      if(!title) title = stripTags(body).replace(/\s+/g, " ").trim().slice(0, 30) || "未命名文章";
+      var excerpt = String(rowGet(r, ["摘要", "简介", "excerpt", "summary"]) || "").trim() || deriveExcerpt(body);
+      made.push({id: uniqueArticleId(),
+        tag: String(rowGet(r, ["栏目", "分类", "tag", "category"]) || "").trim() || (DATA.categories[0] || ""),
+        date: normDate(rowGet(r, ["日期", "时间", "date", "Date"])),
+        mins: estimateMins(body), title: title, excerpt: excerpt, body: body});
+    });
+    return {made: made, skipped: skipped};
+  });
+}
+function downloadSheetTemplate(){
+  function q(s){ return "\"" + String(s).replace(/"/g, "\"\"") + "\""; }
+  var rows = [
+    ["标题", "栏目", "日期", "摘要", "正文"].map(q).join(","),
+    [q("示例文章标题"), q(DATA.categories[0] || ""), q(todayStr()), q("显示在文章列表里的一两句话。"), q("第一段正文。\n\n第二段正文，段落之间空一行。")].join(",")
+  ];
+  var blob = new Blob(["\ufeff" + rows.join("\r\n")], {type: "text/csv;charset=utf-8"});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url; a.download = "文章导入模板.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+}
+function importCard(){
+  var c = card("导入文章", "Word：选一个 .docx 就是一篇文章（可以一次选多个），标题取文档里写的标题——文档属性里的标题优先，没有就用第一个大标题，再没有用文件名；正文的段落、小标题、加粗、列表和图片都会保留。Excel / CSV：第一行是表头「标题、栏目、日期、摘要、正文」，下面一行一篇文章；日期写 2026-11-22 这样就行，正文里段落之间空一行。导入的文章排在下面列表最上面，检查改好后再发布。");
+  var row = el("div", "import-row");
+  var bWord = el("button", "btn primary", "导入 Word（.docx）"); bWord.type = "button";
+  var fWord = document.createElement("input");
+  fWord.type = "file"; fWord.accept = ".docx"; fWord.multiple = true; fWord.hidden = true;
+  var bSheet = el("button", "btn", "导入 Excel / CSV"); bSheet.type = "button";
+  var fSheet = document.createElement("input");
+  fSheet.type = "file"; fSheet.accept = ".xlsx,.xls,.csv"; fSheet.hidden = true;
+  var bTpl = el("button", "btn small", "下载表格模板（CSV）"); bTpl.type = "button";
+  bWord.addEventListener("click", function(){ fWord.click(); });
+  bSheet.addEventListener("click", function(){ fSheet.click(); });
+  bTpl.addEventListener("click", downloadSheetTemplate);
+  fWord.addEventListener("change", function(){
+    var files = Array.prototype.slice.call(fWord.files || []);
+    fWord.value = "";
+    if(!files.length) return;
+    bWord.disabled = true; bSheet.disabled = true; bWord.textContent = "正在导入…";
+    var made = [], problems = [];
+    var chain = Promise.resolve();
+    files.forEach(function(f){
+      chain = chain.then(function(){
+        return docxToArticle(f).then(function(a){ made.push(a); })
+          .catch(function(e){ problems.push("《" + f.name + "》没导入成功" + (e && e.message ? "：" + e.message : "")); });
+      });
+    });
+    chain.then(function(){ finishImport(made, problems); });
+  });
+  fSheet.addEventListener("change", function(){
+    var f = fSheet.files && fSheet.files[0];
+    fSheet.value = "";
+    if(!f) return;
+    bWord.disabled = true; bSheet.disabled = true; bSheet.textContent = "正在导入…";
+    sheetToArticles(f).then(function(r){
+      var problems = [];
+      if(r.skipped) problems.push("表格里有 " + r.skipped + " 行是空的，已跳过。");
+      finishImport(r.made, problems);
+    }).catch(function(e){
+      finishImport([], ["《" + f.name + "》没导入成功" + (e && e.message ? "：" + e.message : "")]);
+    });
+  });
+  row.appendChild(bWord); row.appendChild(bSheet); row.appendChild(bTpl);
+  row.appendChild(fWord); row.appendChild(fSheet);
+  c.appendChild(row);
+  if(importNote) c.appendChild(el("p", "import-note" + (importNoteIsErr ? " err" : ""), importNote));
+  return c;
+}
+
 /* ---------- 文章 ---------- */
 function renderPosts(sec){
   sec.appendChild(panelHead("文章", "博客的全部文章。点开任意一篇改标题、栏目、摘要和正文；顺序就是列表里的顺序，也决定「上一篇 / 下一篇」。"));
@@ -519,7 +762,12 @@ function renderPosts(sec){
     {hint:"改完栏目名，记得把文章的栏目也改成新名字，不然那篇文章在筛选里找不到。"}));
   sec.appendChild(cc);
 
+  sec.appendChild(importCard());
   var list = card("全部文章（" + DATA.articles.length + " 篇）");
+  var atop = el("div", "add-row add-top");
+  var abtn = el("button", "btn primary", "＋ 写新文章"); abtn.type = "button";
+  abtn.addEventListener("click", addArticle);
+  atop.appendChild(abtn); list.appendChild(atop);
   DATA.articles.forEach(function(a, i){
     var body = el("div");
     body.appendChild(fieldText("标题", function(){ return a.title; }, function(v){ a.title = v; }));
@@ -547,17 +795,6 @@ function renderPosts(sec){
       }
     }));
   });
-  var add = el("button", "btn", "＋ 写新文章"); add.type = "button";
-  add.addEventListener("click", function(){
-    var id = "post-" + Date.now().toString(36);
-    var today = new Date();
-    function p(n){ return (n<10?"0":"")+n; }
-    DATA.articles.unshift({id:id, tag:DATA.categories[0] || "", date:today.getFullYear() + "-" + p(today.getMonth()+1) + "-" + p(today.getDate()),
-      mins:"约 3 分钟", title:"新文章", excerpt:"", body:"<p>在这里写正文。</p>"});
-    openState["art" + id] = true;
-    render(); saveData();
-  });
-  var ar = el("div", "add-row"); ar.appendChild(add); list.appendChild(ar);
   sec.appendChild(list);
 }
 
@@ -566,6 +803,10 @@ function renderTalks(sec){
   sec.appendChild(panelHead("说说", "短动态，按列表顺序显示（新的放上面）。正文里可以用 <b>…</b> 加粗。"));
   sec.appendChild(bannerCard("shuoshuo", "说说页横幅"));
   var list = card("全部说说（" + DATA.talks.length + " 条）");
+  var ttop = el("div", "add-row add-top");
+  var tbtn = el("button", "btn primary", "＋ 发新说说"); tbtn.type = "button";
+  tbtn.addEventListener("click", addTalk);
+  ttop.appendChild(tbtn); list.appendChild(ttop);
   DATA.talks.forEach(function(t, i){
     var body = el("div");
     body.appendChild(fieldText("日期", function(){ return t.date; }, function(v){ t.date = v; }, {type:"date",
@@ -599,15 +840,6 @@ function renderTalks(sec){
       }
     }));
   });
-  var add = el("button", "btn", "＋ 发新说说"); add.type = "button";
-  add.addEventListener("click", function(){
-    var today = new Date();
-    function p(n){ return (n<10?"0":"")+n; }
-    DATA.talks.unshift({date:today.getFullYear() + "-" + p(today.getMonth()+1) + "-" + p(today.getDate()), text:"", photos:[]});
-    openState["talk0"] = true;
-    render(); saveData();
-  });
-  var ar = el("div", "add-row"); ar.appendChild(add); list.appendChild(ar);
   sec.appendChild(list);
 }
 
